@@ -5,8 +5,12 @@ import importlib
 import json
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from app.db import get_connection, init_db, save_creator_analysis
+from app.access_control import detect_access_control
 from app.llm import (
+    apply_extracted_profile_overrides,
     get_analyzer_metadata,
     infer_follower_count,
     infer_nickname,
@@ -20,8 +24,12 @@ from app.scraper import (
     ScrapeResult,
     SimpleHTMLExtractor,
     detect_manual_verification,
+    detect_platform,
     enrich_platform_extraction,
     extract_xhs_profile,
+    filter_recent_links,
+    _extract_page_text,
+    should_skip_playwright_for_runtime,
 )
 
 
@@ -93,6 +101,121 @@ def test_sample_output_matches_required_creator_schema_exactly() -> None:
 def test_normalize_base_url_accepts_full_chat_completions_url() -> None:
     assert normalize_base_url("https://api.deepseek.com/chat/completions") == "https://api.deepseek.com"
     assert normalize_base_url("https://api.deepseek.com") == "https://api.deepseek.com"
+
+
+def test_platform_detection_common_creator_platforms() -> None:
+    assert detect_platform("https://weibo.com/u/123") == "weibo"
+    assert detect_platform("https://www.douyin.com/user/abc") == "douyin"
+    assert detect_platform("https://www.iesdouyin.com/share/user/abc") == "douyin"
+    assert detect_platform("https://www.xiaohongshu.com/user/profile/abc") == "xiaohongshu"
+    assert detect_platform("https://space.bilibili.com/123") == "bilibili"
+    assert detect_platform("https://b23.tv/abc") == "bilibili"
+    assert detect_platform("https://www.instagram.com/user/") == "instagram"
+    assert detect_platform("https://www.tiktok.com/@user") == "tiktok"
+    assert detect_platform("https://youtu.be/abc") == "youtube"
+
+
+def test_access_control_detects_weibo_visitor_system() -> None:
+    result = detect_access_control(
+        ScrapeResult(
+            platform="weibo",
+            profile_url="https://weibo.com/u/123",
+            title="Sina Visitor System",
+            visible_text="\u5fae\u535a\u8bbf\u5ba2\u7cfb\u7edf \u767b\u5f55\u540e\u67e5\u770b",
+        )
+    )
+    assert result.access_status == "login_required"
+    assert result.should_skip_llm is True
+
+
+def test_access_control_detects_douyin_manual_verification() -> None:
+    result = detect_access_control(
+        ScrapeResult(
+            platform="douyin",
+            profile_url="https://www.douyin.com/passport/login",
+            title="\u626b\u7801\u767b\u5f55",
+            visible_text="\u6296\u97f3\u5b89\u5168\u4e2d\u5fc3 \u8bf7\u5b8c\u6210\u9a8c\u8bc1",
+        )
+    )
+    assert result.access_status in {"captcha_required", "login_required"}
+    assert result.should_skip_llm is True
+
+
+def test_access_control_detects_generic_captcha() -> None:
+    result = detect_access_control(
+        ScrapeResult(
+            platform="website",
+            profile_url="https://example.com/profile",
+            title="Verification",
+            visible_text="Please complete CAPTCHA verification to continue.",
+        )
+    )
+    assert result.access_status == "captcha_required"
+
+
+def test_access_control_detects_empty_invalid_social_profile() -> None:
+    result = detect_access_control(
+        ScrapeResult(
+            platform="instagram",
+            profile_url="https://www.instagram.com/example/",
+            title="Instagram",
+            visible_text="",
+        )
+    )
+    assert result.access_status == "empty_or_invalid_profile"
+    assert result.should_skip_llm is True
+
+
+def test_xiaohongshu_public_profile_with_login_modal_is_accessible() -> None:
+    result = detect_access_control(
+        ScrapeResult(
+            platform="xiaohongshu",
+            profile_url="https://www.xiaohongshu.com/user/profile/abc",
+            title="柠檬00 - 小红书",
+            meta_description="柠檬00在「小红书」上有3.6万位粉丝",
+            visible_text="登录后查看更多\n" + XHS_VISIBLE_TEXT,
+            profile_bio="05dancer 穿搭舞蹈集合",
+            follower_count="3.6万",
+            recent_post_titles=["舞编成这样能当小县城舞蹈老师吗…？"],
+        )
+    )
+
+    assert result.access_status == "normal_accessible"
+    assert result.should_skip_llm is False
+
+
+def test_weibo_recent_links_exclude_my_groups_navigation() -> None:
+    links = filter_recent_links(
+        [
+            ("最新微博", "https://weibo.com/mygroups?gid=110006935251083"),
+            ("好友圈", "https://weibo.com/mygroups?gid=100096935251083"),
+            ("真实微博", "https://weibo.com/2722493191/O9AbcDefg"),
+        ],
+        "https://weibo.com/u/2722493191?tabtype=feed",
+        "weibo",
+    )
+
+    assert links == [("真实微博", "https://weibo.com/2722493191/O9AbcDefg")]
+
+
+def test_empty_scraped_recent_posts_clear_llm_navigation_titles() -> None:
+    analysis = CreatorAnalysis(
+        platform="weibo",
+        profile_url="https://weibo.com/u/2722493191",
+        recent_post_titles=["最新微博", "好友圈"],
+        recent_post_links=["https://weibo.com/mygroups?gid=1"],
+    )
+    scrape = ScrapeResult(
+        platform="weibo",
+        profile_url="https://weibo.com/u/2722493191",
+        recent_post_titles=[],
+        recent_post_links=[],
+    )
+
+    cleaned = apply_extracted_profile_overrides(analysis, scrape, None, preserve_llm_analysis=True)
+
+    assert cleaned.recent_post_titles == []
+    assert cleaned.recent_post_links == []
 
 
 def test_analyze_profile_default_returns_creator_json_directly() -> None:
@@ -191,9 +314,80 @@ def test_analyze_profile_manual_verification_response_is_status_object() -> None
     assert response.resume_token
 
 
+def test_blocked_pages_are_not_sent_to_analyzer() -> None:
+    main = importlib.import_module("app.main")
+    original_scrape = main.scrape_profile
+    original_analyze = main.analyze_with_llm
+    called = {"analyze": False}
+
+    async def fake_scrape(url: str, manual_verification: bool = False) -> ScrapeResult:
+        return ScrapeResult(
+            platform="weibo",
+            profile_url=url,
+            title="Sina Visitor System",
+            visible_text="\u5fae\u535a\u8bbf\u5ba2\u7cfb\u7edf \u767b\u5f55\u540e\u67e5\u770b",
+        )
+
+    async def fake_analyze(scrape: ScrapeResult, brand_brief: str | None = None) -> CreatorAnalysis:
+        called["analyze"] = True
+        return CreatorAnalysis()
+
+    try:
+        main.scrape_profile = fake_scrape
+        main.analyze_with_llm = fake_analyze
+        response = asyncio.run(
+            main.analyze_profile(
+                AnalyzeProfileRequest(
+                    profile_url="https://weibo.com/u/123",
+                    debug=True,
+                    save_to_db=False,
+                )
+            )
+        )
+    finally:
+        main.scrape_profile = original_scrape
+        main.analyze_with_llm = original_analyze
+
+    assert called["analyze"] is False
+    assert response.status == "login_required"
+    assert response.analysis_source == "skipped_due_to_access_control"
+    assert response.access_control["should_skip_llm"] is True
+
+
 def test_detect_manual_verification_keywords() -> None:
     reasons = detect_manual_verification("Please log in. CAPTCHA required.")
     assert reasons
+
+
+def test_windows_selector_loop_skips_playwright_in_non_manual_mode(monkeypatch) -> None:
+    import app.scraper as scraper
+
+    class _WindowsSelectorEventLoop:
+        pass
+
+    monkeypatch.setattr(scraper.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(scraper.asyncio, "get_running_loop", lambda: _WindowsSelectorEventLoop())
+
+    assert should_skip_playwright_for_runtime(manual_verification=False) is True
+    assert should_skip_playwright_for_runtime(manual_verification=True) is False
+
+
+def test_extract_page_text_does_not_require_meta_description() -> None:
+    class FakePage:
+        async def title(self) -> str:
+            return "Creator Page"
+
+        async def evaluate(self, script: str) -> dict[str, str]:
+            return {
+                "metaDescription": "",
+                "visibleText": "public profile text",
+            }
+
+    title, meta_description, visible_text = asyncio.run(_extract_page_text(FakePage()))
+
+    assert title == "Creator Page"
+    assert meta_description == ""
+    assert visible_text == "public profile text"
 
 
 def test_html_extractor_skips_script_and_style_content() -> None:
@@ -412,3 +606,83 @@ def test_rule_based_analysis_handles_education_campus_creator() -> None:
     assert "\u9002\u5408\u5185\u5bb9\u521b\u4f5c\u5de5\u5177\u63a8\u5e7f" in creator.brand_fit_tags
     assert creator.risk_flags == []
     assert "\u57fa\u4e8e\u516c\u5f00\u9875\u9762\u5143\u6570\u636e" not in creator.summary
+
+
+def test_manual_verification_launch_failure_returns_clear_status() -> None:
+    main = importlib.import_module("app.main")
+    original_start = main.start_manual_session
+    original_analyze = main.analyze_with_llm
+    called = {"analyze": False}
+
+    async def fake_start(url: str, task_id: str):
+        raise RuntimeError("")
+
+    async def fake_analyze(scrape: ScrapeResult, brand_brief: str | None = None) -> CreatorAnalysis:
+        called["analyze"] = True
+        return CreatorAnalysis()
+
+    try:
+        main.start_manual_session = fake_start
+        main.analyze_with_llm = fake_analyze
+        response = asyncio.run(
+            main.analyze_profile(
+                AnalyzeProfileRequest(
+                    profile_url="https://weibo.com/u/123",
+                    manual_verification=True,
+                    save_to_db=False,
+                )
+            )
+        )
+    finally:
+        main.start_manual_session = original_start
+        main.analyze_with_llm = original_analyze
+
+    payload = json.loads(response.body)
+    assert payload["status"] == "manual_verification_unavailable"
+    assert payload["manual_verification_required"] is True
+    assert payload["platform"] == "weibo"
+    assert payload["message"]
+    assert "creator" not in payload
+    assert payload["resume_token"] is None
+    assert called["analyze"] is False
+
+
+def test_manual_verification_launch_failure_http_response_omits_creator() -> None:
+    main = importlib.import_module("app.main")
+    original_start = main.start_manual_session
+    original_analyze = main.analyze_with_llm
+    called = {"analyze": False}
+
+    async def fake_start(url: str, task_id: str):
+        raise RuntimeError("")
+
+    async def fake_analyze(scrape: ScrapeResult, brand_brief: str | None = None) -> CreatorAnalysis:
+        called["analyze"] = True
+        return CreatorAnalysis()
+
+    try:
+        main.start_manual_session = fake_start
+        main.analyze_with_llm = fake_analyze
+        client = TestClient(main.app)
+        response = client.post(
+            "/analyze-profile",
+            json={
+                "profile_url": "https://weibo.com/u/123",
+                "manual_verification": True,
+                "save_to_db": False,
+            },
+        )
+    finally:
+        main.start_manual_session = original_start
+        main.analyze_with_llm = original_analyze
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "manual_verification_unavailable"
+    assert payload["platform"] == "weibo"
+    assert payload["message"]
+    assert payload["resume_token"] is None
+    assert "creator" not in payload
+    assert "raw_extraction" not in payload
+    assert "access_control" not in payload
+    assert called["analyze"] is False

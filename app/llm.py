@@ -234,8 +234,7 @@ def apply_extracted_profile_overrides(
         analysis.bio = scrape.profile_bio
     if scrape.follower_count:
         analysis.follower_count = scrape.follower_count
-    if scrape.recent_post_titles:
-        analysis.recent_post_titles = scrape.recent_post_titles
+    analysis.recent_post_titles = scrape.recent_post_titles
     if scrape.recent_post_links is not None:
         analysis.recent_post_links = scrape.recent_post_links
     analysis.brand_fit_tags = remove_generic_tags(analysis.brand_fit_tags)

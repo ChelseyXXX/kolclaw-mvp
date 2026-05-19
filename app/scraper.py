@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 import platform
 import re
 import sys
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
+from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 
@@ -94,11 +97,30 @@ LEGAL_OR_REPORT_DOMAINS = [
     "beian.miit.gov.cn",
 ]
 
+WINDOWS_CHROME_EXECUTABLE_CANDIDATES = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
+
+MANUAL_VERIFICATION_UNAVAILABLE_MESSAGE = (
+    "Manual verification requires Playwright headed browser, but the browser could not be "
+    "launched in the current Python/Windows environment. On Windows, run uvicorn without "
+    "`--reload` when using Playwright, use Python 3.11/3.12, or run without "
+    "manual_verification."
+)
+
+
+class ManualVerificationUnavailable(RuntimeError):
+    def __init__(self, platform_name: str, message: str = MANUAL_VERIFICATION_UNAVAILABLE_MESSAGE) -> None:
+        super().__init__(message)
+        self.platform = platform_name
+
 
 @dataclass
 class ScrapeResult:
     platform: str
     profile_url: str
+    http_status: int | None = None
     title: str = ""
     meta_description: str = ""
     visible_text: str = ""
@@ -115,20 +137,31 @@ class ScrapeResult:
         return asdict(self)
 
 
+@dataclass
+class ManualBrowserSession:
+    playwright: Any
+    browser: Any
+    context: Any
+    page: Any
+    storage_state_path: str
+
+
 def detect_platform(url: str) -> str:
     host = urlparse(url).netloc.lower()
-    if "instagram" in host:
-        return "instagram"
-    if "tiktok" in host:
-        return "tiktok"
-    if "youtube" in host:
-        return "youtube"
     if "xiaohongshu" in host or "xhslink" in host:
         return "xiaohongshu"
-    if "douyin" in host:
+    if "weibo" in host:
+        return "weibo"
+    if "douyin" in host or "iesdouyin" in host:
         return "douyin"
-    if "bilibili" in host:
+    if "bilibili" in host or "b23.tv" in host:
         return "bilibili"
+    if "tiktok" in host:
+        return "tiktok"
+    if "instagram" in host:
+        return "instagram"
+    if "youtube" in host or "youtu.be" in host:
+        return "youtube"
     return "website"
 
 
@@ -158,11 +191,34 @@ def has_useful_public_metadata(title: str, meta_description: str) -> bool:
 
 
 def should_skip_playwright_for_runtime(manual_verification: bool) -> bool:
-    return (
-        not manual_verification
-        and platform.system() == "Windows"
-        and sys.version_info >= (3, 14)
-    )
+    return not manual_verification and windows_runtime_cannot_launch_playwright_subprocess()
+
+
+def windows_runtime_cannot_launch_playwright_subprocess() -> bool:
+    if platform.system() != "Windows":
+        return False
+    return sys.version_info >= (3, 14) or windows_current_loop_uses_selector()
+
+
+def windows_playwright_runtime_issue() -> str:
+    if platform.system() != "Windows":
+        return ""
+    if sys.version_info >= (3, 14):
+        return f"Detected Python {platform.python_version()}, which is not recommended for this demo."
+    if windows_current_loop_uses_selector():
+        return (
+            "Detected Windows Selector asyncio event loop, which cannot launch Playwright "
+            "subprocesses. Start Uvicorn without `--reload`."
+        )
+    return ""
+
+
+def windows_current_loop_uses_selector() -> bool:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return "selector" in loop.__class__.__name__.lower()
 
 
 async def scrape_profile(
@@ -187,7 +243,7 @@ async def scrape_profile(
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=not manual_verification)
+            browser = await launch_chromium_with_fallbacks(p, headless=not manual_verification)
             context = await browser.new_context(
                 viewport={"width": 1366, "height": 900},
                 user_agent=(
@@ -197,7 +253,7 @@ async def scrape_profile(
                 ),
             )
             page = await context.new_page()
-            await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
+            response = await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(1500)
 
             title, meta_description, visible_text = await _extract_page_text(page)
@@ -229,6 +285,7 @@ async def scrape_profile(
     result = ScrapeResult(
         platform=platform_name,
         profile_url=profile_url,
+        http_status=response.status if response else None,
         title=title,
         meta_description=meta_description,
         visible_text=compact_text(visible_text),
@@ -253,6 +310,7 @@ def scrape_profile_with_urllib(profile_url: str) -> ScrapeResult:
         },
     )
     with urllib.request.urlopen(request, timeout=30) as response:
+        http_status = response.status
         charset = response.headers.get_content_charset() or "utf-8"
         raw_html = response.read().decode(charset, errors="replace")
 
@@ -268,6 +326,7 @@ def scrape_profile_with_urllib(profile_url: str) -> ScrapeResult:
     result = ScrapeResult(
         platform=platform_name,
         profile_url=profile_url,
+        http_status=http_status,
         title=parser.title,
         meta_description=parser.meta_description,
         visible_text=visible_text,
@@ -278,6 +337,149 @@ def scrape_profile_with_urllib(profile_url: str) -> ScrapeResult:
     )
     enrich_platform_extraction(result, visible_text)
     return result
+
+
+async def start_manual_session(profile_url: str, task_id: str) -> tuple[ScrapeResult, ManualBrowserSession]:
+    platform_name = detect_platform(profile_url)
+    runtime_issue = windows_playwright_runtime_issue()
+    if runtime_issue:
+        raise ManualVerificationUnavailable(
+            platform_name,
+            f"{MANUAL_VERIFICATION_UNAVAILABLE_MESSAGE} {runtime_issue}",
+        )
+
+    configure_windows_event_loop_policy()
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise ManualVerificationUnavailable(
+            platform_name,
+            f"{MANUAL_VERIFICATION_UNAVAILABLE_MESSAGE} Cause: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    p = None
+    browser = None
+    context = None
+    try:
+        p = await async_playwright().start()
+        browser = await launch_chromium_with_fallbacks(p, headless=False)
+        context = await browser.new_context(
+            viewport={"width": 1366, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            ),
+        )
+        page = await context.new_page()
+        response = await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
+        await page.wait_for_timeout(1500)
+
+        storage_dir = Path("storage_states")
+        storage_dir.mkdir(exist_ok=True)
+        storage_state_path = str(storage_dir / f"{platform_name}_{task_id}.json")
+        session = ManualBrowserSession(
+            playwright=p,
+            browser=browser,
+            context=context,
+            page=page,
+            storage_state_path=storage_state_path,
+        )
+        scrape = await scrape_from_manual_session(session, profile_url, response.status if response else None)
+        return scrape, session
+    except ManualVerificationUnavailable:
+        raise
+    except Exception as exc:
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        if p is not None:
+            try:
+                await p.stop()
+            except Exception:
+                pass
+        raise ManualVerificationUnavailable(
+            platform_name,
+            f"{MANUAL_VERIFICATION_UNAVAILABLE_MESSAGE} Cause: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
+async def launch_chromium_with_fallbacks(playwright: Any, headless: bool):
+    errors: list[str] = []
+    try:
+        return await playwright.chromium.launch(headless=headless)
+    except Exception as exc:
+        errors.append(f"bundled Chromium failed: {type(exc).__name__}: {exc}")
+
+    for launch_kwargs in chromium_fallback_launch_kwargs(headless):
+        try:
+            return await playwright.chromium.launch(**launch_kwargs)
+        except Exception as exc:
+            label = launch_kwargs.get("channel") or launch_kwargs.get("executable_path") or "fallback"
+            errors.append(f"{label} failed: {type(exc).__name__}: {exc}")
+
+    raise RuntimeError(" | ".join(errors))
+
+
+def chromium_fallback_launch_kwargs(headless: bool) -> list[dict[str, Any]]:
+    if platform.system() != "Windows":
+        return []
+
+    launch_options: list[dict[str, Any]] = [{"channel": "chrome", "headless": headless}]
+    local_chrome = os.environ.get("LOCALAPPDATA")
+    candidates = list(WINDOWS_CHROME_EXECUTABLE_CANDIDATES)
+    if local_chrome:
+        candidates.append(str(Path(local_chrome) / "Google" / "Chrome" / "Application" / "chrome.exe"))
+
+    for candidate in candidates:
+        if Path(candidate).exists():
+            launch_options.append({"executable_path": candidate, "headless": headless})
+    return launch_options
+
+
+async def scrape_from_manual_session(
+    session: ManualBrowserSession,
+    profile_url: str,
+    http_status: int | None = None,
+) -> ScrapeResult:
+    await session.page.wait_for_timeout(1000)
+    title, meta_description, visible_text = await _extract_page_text(session.page)
+    link_pairs = await _extract_recent_link_pairs(session.page)
+    platform_name = detect_platform(profile_url)
+    filtered_links = filter_recent_links(link_pairs, profile_url, platform_name)
+    try:
+        await session.context.storage_state(path=session.storage_state_path)
+    except Exception:
+        pass
+    result = ScrapeResult(
+        platform=platform_name,
+        profile_url=profile_url,
+        http_status=http_status,
+        title=title,
+        meta_description=meta_description,
+        visible_text=compact_text(visible_text),
+        recent_post_titles=[item[0] for item in filtered_links],
+        recent_post_links=[item[1] for item in filtered_links],
+    )
+    enrich_platform_extraction(result, visible_text)
+    return result
+
+
+async def close_manual_session(session: ManualBrowserSession) -> None:
+    try:
+        await session.context.close()
+    finally:
+        try:
+            await session.browser.close()
+        finally:
+            await session.playwright.stop()
 
 
 class SimpleHTMLExtractor(HTMLParser):
@@ -537,6 +739,8 @@ def filter_recent_links(
             continue
         if platform_name == "xiaohongshu" and not is_real_xhs_note_url(absolute_href):
             continue
+        if platform_name == "weibo" and not is_real_weibo_post_url(absolute_href):
+            continue
         if is_noise_title(title):
             continue
         seen.add(absolute_href)
@@ -564,20 +768,77 @@ def is_real_xhs_note_url(url: str) -> bool:
     )
 
 
+def is_real_weibo_post_url(url: str) -> bool:
+    parsed = urlparse(urljoin("https://weibo.com", url))
+    host = parsed.netloc.lower()
+    if not (host == "weibo.com" or host.endswith(".weibo.com")):
+        return False
+
+    path = parsed.path.strip("/").lower()
+    if not path:
+        return False
+    if any(
+        path == noise or path.startswith(f"{noise}/")
+        for noise in [
+            "mygroups",
+            "u",
+            "profile",
+            "login",
+            "search",
+            "hot",
+            "messages",
+            "settings",
+            "tv",
+            "newlogin",
+            "p",
+        ]
+    ):
+        return False
+
+    parts = path.split("/")
+    return (
+        len(parts) >= 2
+        and re.fullmatch(r"\d{5,}", parts[0]) is not None
+        and re.fullmatch(r"[0-9a-z]+", parts[1]) is not None
+    )
+
+
 async def _extract_page_text(page) -> tuple[str, str, str]:
-    title = await page.title()
-    meta_description = await page.locator("meta[name='description']").first.get_attribute("content")
-    visible_text = await page.locator("body").inner_text(timeout=10000)
-    return title or "", meta_description or "", visible_text or ""
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+
+    try:
+        page_text = await page.evaluate(
+            """() => ({
+                metaDescription: document.querySelector('meta[name="description"]')?.getAttribute('content') || '',
+                visibleText: document.body?.innerText || ''
+            })"""
+        )
+        return (
+            title or "",
+            page_text.get("metaDescription", "") or "",
+            page_text.get("visibleText", "") or "",
+        )
+    except Exception:
+        try:
+            visible_text = await page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            visible_text = ""
+        return title or "", "", visible_text or ""
 
 
 async def _extract_recent_link_pairs(page) -> list[tuple[str, str]]:
-    links = await page.locator("a").evaluate_all(
-        """nodes => nodes.slice(0, 120).map(a => ({
-            text: (a.innerText || a.textContent || '').trim(),
-            href: a.href || ''
-        }))"""
-    )
+    try:
+        links = await page.locator("a").evaluate_all(
+            """nodes => nodes.slice(0, 120).map(a => ({
+                text: (a.innerText || a.textContent || '').trim(),
+                href: a.href || ''
+            }))"""
+        )
+    except Exception:
+        return []
     pairs: list[tuple[str, str]] = []
     for link in links:
         text = compact_inline_text(link.get("text", ""), max_chars=120)

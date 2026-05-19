@@ -26,7 +26,7 @@ The code, README, API fields, and JSON keys use English. The LLM prompt asks the
 
 ## Setup
 
-Use Python 3.11 or 3.12 on Windows. Python 3.14 may fail when Playwright launches its subprocess transport.
+Use Python 3.11 or 3.12 on Windows. Python 3.14 may fail when Playwright launches its subprocess transport. If you use Playwright on Windows, run Uvicorn without `--reload`.
 
 ```bash
 python -m venv .venv
@@ -59,24 +59,50 @@ If `LLM_API_KEY` is not set, the app uses a deterministic mock analyzer so the d
 
 If Playwright is not installed or Playwright launch fails in non-manual mode, the scraper falls back to a standard-library HTTP/HTML extractor for simple public pages. Playwright is still required for JavaScript-heavy pages and manual verification mode.
 
-On Windows Python 3.14, non-manual scraping skips Playwright and uses the HTTP/HTML fallback automatically to avoid the `asyncio.create_subprocess_exec` subprocess issue.
+On Windows Python 3.14, or when Uvicorn `--reload` selects a Windows Selector event loop, non-manual scraping skips Playwright and uses the HTTP/HTML fallback automatically to avoid the `asyncio.create_subprocess_exec` subprocess issue.
+
+Manual verification mode still requires a headed Playwright browser. If `manual_verification=true` is used on an incompatible Windows/Python runtime and Playwright cannot launch, the API returns:
+
+```json
+{
+  "status": "manual_verification_unavailable",
+  "manual_verification_required": true,
+  "platform": "weibo",
+  "message": "Manual verification requires Playwright headed browser, but the browser could not be launched in the current Python/Windows environment. On Windows, run uvicorn without `--reload` when using Playwright, use Python 3.11/3.12, or run without manual_verification.",
+  "resume_token": null
+}
+```
+
+In that case, use Python 3.11 or 3.12, run Uvicorn without `--reload`, install Chromium with `python -m playwright install chromium`, or retry without `manual_verification` to use the HTTP fallback when possible. The app does not send this failed manual-verification page to the LLM and does not return a fake creator profile.
 
 For Xiaohongshu pages, the scraper applies lightweight profile-section parsing before the LLM/mock analyzer runs. It prefers visible profile bio and stats over `meta_description`, filters legal/footer/navigation noise, and only keeps conservative note-like URLs.
 
-## Known Issue: Windows + Python 3.14 + Playwright
+## Known Issue: Windows + Uvicorn Reload + Playwright
 
-On Windows, Python 3.14 may raise:
+On Windows, Uvicorn `--reload` and Python 3.14 may raise:
 
 ```text
 NotImplementedError at asyncio.create_subprocess_exec
 ```
 
-This happens when Playwright cannot launch its subprocess transport with the active asyncio event loop. The app now sets a Windows-compatible `asyncio.WindowsProactorEventLoopPolicy` before Playwright is used, but Python 3.11 or 3.12 is still recommended for this demo.
+This happens when Playwright cannot launch its subprocess transport with the active asyncio event loop. Uvicorn's Windows reload subprocess mode can select a Selector event loop, which does not support `asyncio.create_subprocess_exec`. The app detects this and falls back for non-manual scraping, but manual verification still needs a headed Playwright browser.
+
+Install the browser runtime before using Playwright:
+
+```bash
+python -m playwright install chromium
+```
+
+For Playwright/manual verification on Windows, start the API without reload:
+
+```bash
+python -m uvicorn app.main:app
+```
 
 ## Run API
 
 ```bash
-uvicorn app.main:app --reload
+python -m uvicorn app.main:app
 ```
 
 Open:
@@ -166,17 +192,61 @@ curl -X POST http://127.0.0.1:8000/match-brief ^
   -d "{\"brand_brief\":\"lifestyle and light sports creator, low risk\",\"limit\":5}"
 ```
 
-## Manual Verification Flow
+## General Login / CAPTCHA / Access-Control Handling
 
-For pages that require login or CAPTCHA:
+Many creator platforms may require login, show visitor systems, trigger CAPTCHA, rate-limit traffic, or return an empty shell page. The app now detects platform and access status before sending anything to the LLM.
 
-1. Request analysis with `manual_verification=true`.
-2. Playwright launches a headed Chromium browser.
-3. The scraper detects login/CAPTCHA keywords and pauses for manual verification.
-4. Complete login or CAPTCHA in the browser.
-5. Press Enter in the API server terminal to resume extraction.
+Supported platform detection includes Xiaohongshu, Weibo, Douyin, Bilibili, TikTok, Instagram, YouTube, and generic websites.
 
-This is intentionally simple for a 1-2 day MVP. A production version should store browser sessions, persist cookies, and expose an operator queue.
+Access-control statuses:
+
+- `normal_accessible`
+- `login_required`
+- `manual_verification_required`
+- `captcha_required`
+- `blocked_or_rate_limited`
+- `empty_or_invalid_profile`
+
+Blocked/login/CAPTCHA/empty pages are not sent to the LLM. Instead, the API returns a workflow response:
+
+```json
+{
+  "status": "login_required",
+  "manual_verification_required": true,
+  "platform": "weibo",
+  "message": "Login or verification is required. Please complete it in the opened browser, then call /resume-task/task_xxx.",
+  "resume_token": "task_xxx"
+}
+```
+
+Manual verification flow:
+
+1. Call `POST /analyze-profile` with `manual_verification=true`.
+2. The backend launches a visible Playwright Chromium browser.
+3. If login/CAPTCHA/blocking is detected, the backend keeps the browser open and stores an in-memory paused task.
+4. Complete login or verification in the browser.
+5. Call `POST /resume-task/{task_id}` using the returned `resume_token`.
+6. The backend reuses the browser context/page, re-scrapes the profile, and continues analysis if the page is accessible.
+
+Xiaohongshu can be used as a success-path demo. Weibo or Douyin pages are useful manual-verification demo cases because they often show visitor/login systems.
+
+With `debug=true`, access-control metadata is included:
+
+```json
+{
+  "status": "login_required",
+  "access_control": {
+    "platform": "weibo",
+    "access_status": "login_required",
+    "detection_reasons": ["Login or platform access-control keywords detected"],
+    "matched_keywords": ["Sina Visitor System"],
+    "should_skip_llm": true
+  },
+  "analysis_source": "skipped_due_to_access_control"
+}
+```
+
+This is intentionally simple for a 1-2 day MVP. Paused tasks are stored in memory, with optional storage state files written under `storage_states/`.
 
 ## Tests
 

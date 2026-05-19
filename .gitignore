@@ -4,3 +4,6 @@ __pycache__/
 uvicorn.*.log
 .venv/
 .pytest_cache/
+.pytest_tmp/
+pytest-cache-files-*/
+storage_states/

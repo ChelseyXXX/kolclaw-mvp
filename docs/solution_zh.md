@@ -79,7 +79,33 @@ MVP 会检测 `captcha`, `verify you are human`, `人机验证`, `验证码` 等
 
 这个机制足够展示 pause/resume 思路。生产环境应将 browser context、任务状态、cookie 和 operator action 持久化，不应依赖 terminal input。
 
-### 2.5 如何把非结构化信息交给 LLM
+### 2.5 General Login / CAPTCHA / Access-Control Handling
+
+很多 creator platform 会出现 login wall、visitor system、CAPTCHA、安全验证、rate limit，或者只返回 empty shell page。系统现在会先做 platform detection 和 access-control detection，再决定是否进入 LLM analysis。
+
+当前支持的平台识别包括：Xiaohongshu、Weibo、Douyin、Bilibili、TikTok、Instagram、YouTube 和 generic website。access status 包括：
+
+- `normal_accessible`
+- `login_required`
+- `manual_verification_required`
+- `captcha_required`
+- `blocked_or_rate_limited`
+- `empty_or_invalid_profile`
+
+如果检测到 login / CAPTCHA / blocked / empty profile，系统不会把页面内容发送给 LLM，避免把登录页、验证码页、访客系统或空壳页误当成达人主页分析。默认响应会返回 workflow status、platform、message 和 `resume_token`。
+
+manual verification 流程：
+
+1. 用户调用 `POST /analyze-profile`，并设置 `manual_verification=true`。
+2. 后端用 `Playwright` 启动 visible Chromium，并打开 creator profile URL。
+3. 如果仍检测到 login / CAPTCHA / blocked page，后端保持 browser open，并将 task state 暂存在 memory。
+4. 用户在浏览器中手动完成登录或验证。
+5. 用户调用 `POST /resume-task/{task_id}`。
+6. 后端复用 browser context / page，重新读取页面；如果已可访问，则继续 scraping 和 analysis；如果仍 blocked，则继续返回 manual-verification workflow response。
+
+debug 模式下会返回 `access_control` metadata，包括 `platform`、`access_status`、`detection_reasons`、`matched_keywords` 和 `should_skip_llm`。Xiaohongshu 可作为 success-path demo，Weibo / Douyin 可作为 login/manual-verification demo case。
+
+### 2.6 如何把非结构化信息交给 LLM
 
 抓取结果会先被压缩成 compact raw data：
 
@@ -295,7 +321,7 @@ MVP 中 `POST /match-brief` 使用 rule-based matching：对 `brand_brief`、sum
 运行 API：
 
 ```bash
-uvicorn app.main:app --reload
+python -m uvicorn app.main:app
 ```
 
 分析主页：

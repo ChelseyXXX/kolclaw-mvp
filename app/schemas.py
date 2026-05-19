@@ -34,13 +34,24 @@ class CreatorAnalysis(BaseModel):
 
 
 class AnalyzeProfileResponse(BaseModel):
-    status: Literal["completed", "manual_verification_required", "failed"]
+    status: Literal[
+        "completed",
+        "login_required",
+        "manual_verification_required",
+        "captcha_required",
+        "blocked_or_rate_limited",
+        "empty_or_invalid_profile",
+        "manual_verification_unavailable",
+        "failed",
+    ]
     manual_verification_required: bool
+    platform: str | None = None
     creator: CreatorAnalysis | None = None
     raw_extraction: dict[str, Any] | None = None
+    access_control: dict[str, Any] | None = None
     message: str | None = None
     resume_token: str | None = None
-    analysis_source: Literal["llm", "mock", "rule_based"] | None = None
+    analysis_source: Literal["llm", "mock", "rule_based", "rule_based_fallback", "skipped_due_to_access_control"] | None = None
     llm_provider: Literal["openai", "deepseek", "none"] | None = None
     llm_model: str | None = None
     api_key_detected: bool | None = None
