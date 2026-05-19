@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+uvicorn.*.log
+.venv/
+.pytest_cache/
