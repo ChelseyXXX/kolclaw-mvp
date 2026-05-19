@@ -89,7 +89,7 @@ def test_request_debug_defaults_to_false() -> None:
 
 
 def test_sample_output_matches_required_creator_schema_exactly() -> None:
-    sample_path = Path(__file__).resolve().parent.parent / "examples" / "sample_output.json"
+    sample_path = Path(__file__).resolve().parent / "fixtures" / "creator_analysis_response.json"
     sample = json.loads(sample_path.read_text(encoding="utf-8"))
     assert list(sample.keys()) == REQUIRED_CREATOR_KEYS
     assert "raw_extraction" not in sample

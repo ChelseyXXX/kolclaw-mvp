@@ -1,9 +1,28 @@
 __pycache__/
 *.py[cod]
-*.sqlite3
-uvicorn.*.log
+*$py.class
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+*.sqlite
+*.sqlite3
+*.db
+storage_states/
+uvicorn.*.log
+*.log
+
+# Test and coverage caches
 .pytest_cache/
 .pytest_tmp/
 pytest-cache-files-*/
-storage_states/
+.coverage
+htmlcov/
