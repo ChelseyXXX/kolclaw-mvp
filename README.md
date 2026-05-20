@@ -32,10 +32,6 @@ The service scrapes public creator profile pages, detects login/CAPTCHA/access-c
 |   |-- storage/
 |   |   `-- database.py            # SQLite schema and persistence helpers
 |   `-- main.py                    # FastAPI app entry point
-|-- docs/
-|   `-- solution_zh.md             # Original solution notes
-|-- prompts/
-|   `-- profile_analysis_prompt.md # Prompt reference
 |-- .env.example
 |-- .gitignore
 |-- requirements.txt
