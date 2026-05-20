@@ -1,53 +1,57 @@
 # KOLClaw Creator Analysis MVP
 
-KOLClaw Creator Analysis MVP is a small FastAPI service for creator profile analysis and brand brief matching.
+KOLClaw Creator Analysis MVP is a minimal FastAPI demo for creator profile analysis and brand brief matching.
 
-It supports:
+The service scrapes public creator profile pages, detects login/CAPTCHA/access-control pages, returns structured creator analysis, stores successful analyses in SQLite, and matches saved creators against brand briefs. When `LLM_API_KEY` is not configured, it uses deterministic rule-based analysis so the demo can run without an LLM account.
 
-- `POST /analyze-profile`: scrape a creator homepage, detect login/CAPTCHA/access-control pages, and return structured creator analysis.
-- `POST /resume-task/{task_id}`: resume a manual verification task after login or CAPTCHA is completed in a headed browser.
-- `POST /match-brief`: match saved creator records against a brand brief using rule-based token overlap.
-- SQLite persistence for creator profiles, platform accounts, content samples, tags, risks, and matching data.
+## Main Features
 
-The default analyzer is deterministic rule-based logic when `LLM_API_KEY` is not configured. If an OpenAI-compatible API key is configured, the app calls the configured LLM endpoint through `httpx`.
+- `POST /analyze-profile` scrapes a creator page and returns creator profile JSON.
+- `POST /resume-task/{task_id}` resumes a manual-verification browser task after login or CAPTCHA.
+- `POST /match-brief` matches stored creators to a brand brief with rule-based token overlap.
+- Access-control detection skips login, CAPTCHA, rate-limit, and empty social-profile pages before analysis.
+- SQLite persistence stores creators, platform accounts, content samples, tags, risk records, and matching data.
+- Optional OpenAI-compatible LLM analysis through `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`.
 
-## Project Structure
+## Folder Structure
 
 ```text
 .
-├── app/                         # Core FastAPI app and business logic
-│   ├── main.py                  # API routes and manual verification workflow
-│   ├── scraper.py               # Playwright/urllib scraping and platform extraction
-│   ├── access_control.py        # Login/CAPTCHA/block/empty-page detection
-│   ├── llm.py                   # LLM call, rule-based analyzer, normalization
-│   ├── db.py                    # SQLite schema and persistence helpers
-│   ├── matcher.py               # Brand brief matching
-│   └── schemas.py               # Pydantic request/response models
-├── docs/
-│   └── solution_zh.md           # Original Chinese solution notes
-├── prompts/
-│   └── profile_analysis_prompt.md
-├── tests/
-│   ├── fixtures/
-│   │   └── creator_analysis_response.json
-│   └── test_core.py             # Current regression tests
-├── .env.example                 # Environment variable template
-├── .gitignore
-├── pytest.ini
-├── requirements.txt
-└── README.md
+|-- app/
+|   |-- api/
+|   |   `-- routes.py              # FastAPI route handlers and task state
+|   |-- core/
+|   |   |-- access_control.py      # Login/CAPTCHA/block/empty-page detection
+|   |   `-- config.py              # Project paths and environment helpers
+|   |-- models/
+|   |   `-- schemas.py             # Pydantic request/response models
+|   |-- services/
+|   |   |-- analyzer.py            # LLM call, rule-based analyzer, normalization
+|   |   |-- matcher.py             # Brand brief matching
+|   |   `-- scraper.py             # Playwright/urllib scraping and platform extraction
+|   |-- storage/
+|   |   `-- database.py            # SQLite schema and persistence helpers
+|   `-- main.py                    # FastAPI app entry point
+|-- docs/
+|   `-- solution_zh.md             # Original solution notes
+|-- prompts/
+|   `-- profile_analysis_prompt.md # Prompt reference
+|-- .env.example
+|-- .gitignore
+|-- requirements.txt
+`-- README.md
 ```
 
 Ignored local runtime files include `.venv/`, `__pycache__/`, `.pytest_cache/`, `.pytest_tmp/`, `pytest-cache-files-*`, `*.sqlite3`, logs, and `storage_states/`.
 
 ## Requirements
 
-- Python 3.11 or 3.12 recommended
-- Chromium browser runtime for Playwright when using JavaScript-heavy pages or manual verification
+- Python 3.11 or 3.12 recommended for Playwright/manual verification on Windows
+- Chromium browser runtime for Playwright when scraping JavaScript-heavy pages or using manual verification
 
-On Windows, run Uvicorn without `--reload` when using Playwright/manual verification. Python 3.14 and Windows selector event loops can prevent Playwright from launching subprocesses; the app falls back to `urllib` for non-manual scraping when possible.
+Python 3.14 can run the rule-based demo path, but Playwright subprocess launch is intentionally treated as unsupported in this project.
 
-## Setup
+## Installation
 
 PowerShell:
 
@@ -59,16 +63,15 @@ python -m pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-Use the template as a reference for local environment variables:
+Use the environment template as a reference:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Do not commit `.env`.
 The app reads environment variables from the current shell. It does not automatically load `.env`.
 
-Optional LLM variables:
+Optional LLM configuration:
 
 ```powershell
 $env:LLM_API_KEY="your_api_key"
@@ -76,7 +79,7 @@ $env:LLM_BASE_URL="https://api.openai.com/v1"
 $env:LLM_MODEL="gpt-4o-mini"
 ```
 
-For DeepSeek-compatible usage, set:
+DeepSeek-compatible example:
 
 ```powershell
 $env:LLM_BASE_URL="https://api.deepseek.com"
@@ -117,42 +120,10 @@ curl -X POST http://127.0.0.1:8000/match-brief `
   -d "{\"brand_brief\":\"lifestyle and light sports creator, low risk\",\"limit\":5}"
 ```
 
-## Tests
+## Notes And Limitations
 
-The test suite is offline and does not require network access or Playwright browser launch.
-
-```powershell
-python -m pytest
-```
-
-Current tests cover:
-
-- Pydantic request/response shape
-- Required creator JSON schema fixture
-- Platform detection
-- Login/CAPTCHA/access-control detection
-- Xiaohongshu profile parsing and noise filtering
-- Rule-based analysis fallbacks
-- SQLite save and brief matching
-- Manual verification failure response shape
-
-## Notes For GitHub
-
-Before committing, check:
-
-```powershell
-git status --ignored --short
-```
-
-Do not commit local runtime artifacts:
-
-- `.venv/`
-- `.env`
-- `kolclaw_demo.sqlite3`
-- `storage_states/`
-- `__pycache__/`
-- `.pytest_cache/`
-- `.pytest_tmp/`
-- `pytest-cache-files-*`
-- logs
+- Manual verification opens a headed browser and stores transient Playwright state under `storage_states/`.
+- The local SQLite database defaults to `kolclaw_demo.sqlite3` in the project root and is ignored by git.
+- On Windows, run Uvicorn without `--reload` when using Playwright/manual verification.
+- Generated caches and runtime files are ignored and should not be committed.
 # kolclaw
