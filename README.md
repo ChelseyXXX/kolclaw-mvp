@@ -1,4 +1,4 @@
-# KOLClaw Creator Analysis MVP
+# KOLClaw 达人主页分析 MVP
 
 KOLClaw Creator Analysis MVP is a minimal FastAPI demo for creator profile analysis and brand brief matching.
 
@@ -120,10 +120,3 @@ curl -X POST http://127.0.0.1:8000/match-brief `
   -d "{\"brand_brief\":\"lifestyle and light sports creator, low risk\",\"limit\":5}"
 ```
 
-## Notes And Limitations
-
-- Manual verification opens a headed browser and stores transient Playwright state under `storage_states/`.
-- The local SQLite database defaults to `kolclaw_demo.sqlite3` in the project root and is ignored by git.
-- On Windows, run Uvicorn without `--reload` when using Playwright/manual verification.
-- Generated caches and runtime files are ignored and should not be committed.
-# kolclaw
