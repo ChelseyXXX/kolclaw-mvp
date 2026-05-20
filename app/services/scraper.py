@@ -16,7 +16,7 @@ from urllib.parse import urljoin, urlparse
 
 def configure_windows_event_loop_policy() -> None:
     """Use the Windows loop policy that supports subprocesses before Playwright starts."""
-    if platform.system() != "Windows":
+    if platform.system() != "Windows" or sys.version_info >= (3, 14):
         return
     proactor_policy = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
     if proactor_policy is not None:

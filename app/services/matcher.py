@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from app.db import list_creator_rows, load_analysis_from_row
-from app.schemas import MatchCandidate
+from app.models.schemas import MatchCandidate
+from app.storage.database import list_creator_rows, load_analysis_from_row
 
 
 def tokenize(text: str) -> set[str]:
@@ -49,4 +49,3 @@ def match_brief(conn: sqlite3.Connection, brand_brief: str, limit: int = 5) -> l
 
     candidates.sort(key=lambda item: item.score, reverse=True)
     return candidates[:limit]
-

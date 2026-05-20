@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
-from app.schemas import CreatorAnalysis
-from app.scraper import ScrapeResult
+from app.core.config import get_env_flag, get_llm_api_key, get_llm_base_url, get_llm_model
+from app.models.schemas import CreatorAnalysis
+from app.services.scraper import ScrapeResult
 
 
 SYSTEM_PROMPT = """You are an analyst for KOLClaw.
@@ -106,49 +106,46 @@ async def analyze_with_llm(scrape: ScrapeResult, brand_brief: str | None = None)
     }
 
     if source == "mock":
-        print("Using mock analyzer")
         return mock_analyze(scrape, brand_brief)
     if source == "rule_based":
-        print("Using rule-based analyzer")
         return rule_based_analyze(scrape, brand_brief)
 
-    print("Using real LLM analyzer")
     raw = await _call_openai_compatible_llm(payload, brand_brief)
     analysis = CreatorAnalysis.model_validate(_extract_json(raw))
     return apply_extracted_profile_overrides(analysis, scrape, brand_brief, preserve_llm_analysis=True)
 
 
 def get_analysis_source() -> str:
-    if os.getenv("USE_MOCK_ANALYZER", "").lower() in {"1", "true", "yes"}:
+    if get_env_flag("USE_MOCK_ANALYZER"):
         return "mock"
-    if os.getenv("LLM_API_KEY"):
+    if get_llm_api_key():
         return "llm"
     return "rule_based"
 
 
 def get_llm_provider() -> str:
-    if not os.getenv("LLM_API_KEY"):
+    if not get_llm_api_key():
         return "none"
-    base_url = normalize_base_url(os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")).lower()
+    base_url = normalize_base_url(get_llm_base_url()).lower()
     if "deepseek" in base_url:
         return "deepseek"
     return "openai"
 
 
 def get_analyzer_metadata() -> dict[str, Any]:
-    api_key_detected = bool(os.getenv("LLM_API_KEY"))
+    api_key_detected = bool(get_llm_api_key())
     return {
         "analysis_source": get_analysis_source(),
         "llm_provider": get_llm_provider(),
-        "llm_model": os.getenv("LLM_MODEL", "gpt-4o-mini") if api_key_detected else "",
+        "llm_model": get_llm_model() if api_key_detected else "",
         "api_key_detected": api_key_detected,
     }
 
 
 async def _call_openai_compatible_llm(raw_data: dict[str, Any], brand_brief: str | None) -> str:
-    base_url = normalize_base_url(os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"))
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    api_key = os.environ["LLM_API_KEY"]
+    base_url = normalize_base_url(get_llm_base_url())
+    model = get_llm_model()
+    api_key = get_llm_api_key()
     prompt = USER_PROMPT_TEMPLATE.format(
         brand_brief=brand_brief or "\u65e0\u7279\u5b9a brand brief\uff0c\u8bf7\u505a\u901a\u7528\u8fbe\u4eba\u753b\u50cf\u5206\u6790\u3002",
         raw_data=json.dumps(raw_data, ensure_ascii=False)[:14000],

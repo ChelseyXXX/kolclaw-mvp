@@ -5,10 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
-from app.schemas import CreatorAnalysis
-
-
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "kolclaw_demo.sqlite3"
+from app.core.config import DEFAULT_DB_PATH
+from app.models.schemas import CreatorAnalysis
 
 
 def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -271,4 +269,3 @@ def load_analysis_from_row(row: sqlite3.Row) -> CreatorAnalysis:
         follower_count=row["follower_count"],
         summary=row["summary"],
     )
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-from app.scraper import ScrapeResult, detect_platform
+from app.services.scraper import ScrapeResult, detect_platform
 
 
 AccessStatus = Literal[
